@@ -2,7 +2,8 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
 android {
-    compileSdk 34
+    namespace "app.olauncher"
+    compileSdk 33
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -10,13 +11,13 @@ android {
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+        jvmTarget = '17'
     }
 
     defaultConfig {
         applicationId "app.olauncher"
         minSdkVersion 24
-        targetSdkVersion 34
+        targetSdkVersion 33
         versionCode 88
         versionName "v4.3.5"
 
@@ -39,6 +40,15 @@ android {
     }
     buildFeatures {
         viewBinding = true
+    }
+    configurations.all {
+        resolutionStrategy {
+            force "org.jetbrains.kotlin:kotlin-stdlib:1.8.20"
+            force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.20"
+            force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.20"
+            exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+            exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+        }
     }
 }
 

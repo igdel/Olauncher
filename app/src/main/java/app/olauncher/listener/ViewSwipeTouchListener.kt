@@ -58,7 +58,7 @@ internal open class ViewSwipeTouchListener(c: Context?, v: View) : OnTouchListen
         }
 
         override fun onFling(
-            event1: MotionEvent?,
+            event1: MotionEvent,
             event2: MotionEvent,
             velocityX: Float,
             velocityY: Float,
