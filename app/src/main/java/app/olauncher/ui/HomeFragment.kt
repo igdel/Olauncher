@@ -4,10 +4,14 @@ import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -29,21 +33,8 @@ import app.olauncher.data.AppModel
 import app.olauncher.data.Constants
 import app.olauncher.data.Prefs
 import app.olauncher.databinding.FragmentHomeBinding
-import app.olauncher.helper.appUsagePermissionGranted
-import app.olauncher.helper.dpToPx
-import app.olauncher.helper.expandNotificationDrawer
-import app.olauncher.helper.getChangedAppTheme
-import app.olauncher.helper.getUserHandleFromString
-import app.olauncher.helper.isPackageInstalled
-import app.olauncher.helper.openAlarmApp
-import app.olauncher.helper.openCalendar
-import app.olauncher.helper.openCameraApp
-import app.olauncher.helper.openDialerApp
-import app.olauncher.helper.openSearch
-import app.olauncher.helper.setPlainWallpaperByTheme
-import app.olauncher.helper.showToast
+import app.olauncher.helper.*
 import app.olauncher.listener.OnSwipeTouchListener
-import app.olauncher.listener.ViewSwipeTouchListener
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -53,6 +44,17 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
     private lateinit var prefs: Prefs
     private lateinit var viewModel: MainViewModel
     private lateinit var deviceManager: DevicePolicyManager
+    private lateinit var toneGenerator: ToneGenerator
+    private var selectedAppIndex = 0
+    private val appViews = mutableListOf<TextView>()
+    private val normalTextSize = 20f
+    private val selectedTextSize = 28f
+    private val maxApps = 8
+
+    private var touchCounter = 0
+    private var lastTouchTime = 0L
+    private var isClickToSelectEnabled = false
+    private var isVolumeControlEnabled = false
 
     private var _binding: FragmentHomeBinding? = null
     private val binding get() = _binding!!
@@ -75,6 +77,107 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         setHomeAlignment(prefs.homeAlignment)
         initSwipeTouchListener()
         initClickListeners()
+        setupVolumeControl()
+        setupAppViews()
+        initMediaPlayer()
+        setupUnlockArea()
+    }
+
+    private fun setupUnlockArea() {
+        val unlockArea = TextView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(150.dpToPx(), 150.dpToPx()).apply {
+                gravity = Gravity.TOP or Gravity.END
+                setMargins(0, 20.dpToPx(), 20.dpToPx(), 0)
+            }
+            alpha = 0f  // Fully transparent instead of INVISIBLE
+            visibility = View.VISIBLE
+            isClickable = true
+            isFocusable = true
+            setOnLongClickListener {
+                if (isClickToSelectEnabled) {
+                    isVolumeControlEnabled = !isVolumeControlEnabled
+                    context.showToast(if (isVolumeControlEnabled) "Volume control enabled" else "Volume control disabled")
+                } else {
+                    isClickToSelectEnabled = true
+                    context.showToast("Click-to-select enabled")
+                }
+                true
+            }
+        }
+        (binding.root as ViewGroup).addView(unlockArea)
+    }
+
+
+    private fun setupAppViews() {
+        appViews.apply {
+            clear()
+            add(binding.homeApp1)
+            add(binding.homeApp2)
+            add(binding.homeApp3)
+            add(binding.homeApp4)
+            add(binding.homeApp5)
+            add(binding.homeApp6)
+            add(binding.homeApp7)
+            add(binding.homeApp8)
+        }
+        updateAppSelection()
+    }
+
+    private fun initMediaPlayer() {
+        toneGenerator = ToneGenerator(AudioManager.STREAM_SYSTEM, 50)
+    }
+
+    private fun setupVolumeControl() {
+        val audioManager = requireContext().getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        view?.isFocusableInTouchMode = true
+        view?.requestFocus()
+
+        view?.setOnKeyListener { _, keyCode, event ->
+            when {
+                event.action != KeyEvent.ACTION_DOWN -> false
+                !isVolumeControlEnabled -> false
+                keyCode == KeyEvent.KEYCODE_VOLUME_UP -> {
+                    selectNextApp(-1)
+                    true
+                }
+                keyCode == KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    selectNextApp(1)
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun selectNextApp(direction: Int) {
+        if (appViews.isEmpty() || prefs.homeAppsNum == 0) return
+
+        selectedAppIndex = (selectedAppIndex + direction).let { newIndex ->
+            when {
+                newIndex < 0 -> prefs.homeAppsNum - 1
+                newIndex >= prefs.homeAppsNum -> 0
+                else -> newIndex
+            }
+        }
+
+        updateAppSelection()
+        playSelectionSound()
+    }
+
+    private fun updateAppSelection() {
+        appViews.forEachIndexed { index, textView ->
+            if (index < prefs.homeAppsNum) {
+                textView.textSize = if (index == selectedAppIndex) selectedTextSize else normalTextSize
+            }
+        }
+    }
+
+    private fun playSelectionSound() {
+        try {
+            toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP, 10)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     override fun onResume() {
@@ -85,22 +188,13 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         else hideStatusBar()
     }
 
-    override fun onClick(view: View) {
-        when (view.id) {
-            R.id.lock -> {}
-            R.id.clock -> openClockApp()
-            R.id.date -> openCalendarApp()
-            R.id.setDefaultLauncher -> viewModel.resetLauncherLiveData.call()
-            R.id.tvScreenTime -> openScreenTimeDigitalWellbeing()
+    private fun initSwipeTouchListener() {
+        val context = requireContext()
+        binding.mainLayout.setOnTouchListener(getSwipeGestureListener(context))
 
-            else -> {
-                try { // Launch app
-                    val appLocation = view.tag.toString().toInt()
-                    homeAppClicked(appLocation)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
+        appViews.forEach { textView ->
+            textView.setOnClickListener(this)
+            textView.setOnLongClickListener(this)
         }
     }
 
@@ -128,32 +222,109 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
             )
     }
 
-    override fun onLongClick(view: View): Boolean {
-        when (view.id) {
-            R.id.homeApp1 -> showAppList(Constants.FLAG_SET_HOME_APP_1, prefs.appName1.isNotEmpty(), true)
-            R.id.homeApp2 -> showAppList(Constants.FLAG_SET_HOME_APP_2, prefs.appName2.isNotEmpty(), true)
-            R.id.homeApp3 -> showAppList(Constants.FLAG_SET_HOME_APP_3, prefs.appName3.isNotEmpty(), true)
-            R.id.homeApp4 -> showAppList(Constants.FLAG_SET_HOME_APP_4, prefs.appName4.isNotEmpty(), true)
-            R.id.homeApp5 -> showAppList(Constants.FLAG_SET_HOME_APP_5, prefs.appName5.isNotEmpty(), true)
-            R.id.homeApp6 -> showAppList(Constants.FLAG_SET_HOME_APP_6, prefs.appName6.isNotEmpty(), true)
-            R.id.homeApp7 -> showAppList(Constants.FLAG_SET_HOME_APP_7, prefs.appName7.isNotEmpty(), true)
-            R.id.homeApp8 -> showAppList(Constants.FLAG_SET_HOME_APP_8, prefs.appName8.isNotEmpty(), true)
-            R.id.clock -> {
-                showAppList(Constants.FLAG_SET_CLOCK_APP)
-                prefs.clockAppPackage = ""
-                prefs.clockAppClassName = ""
-                prefs.clockAppUser = ""
+    private fun textOnClick(view: View) = onClick(view)
+
+
+    private fun getSwipeGestureListener(context: Context): View.OnTouchListener {
+        return object : OnSwipeTouchListener(context) {
+            override fun onClick() {
+                super.onClick()
+                if (selectedAppIndex < prefs.homeAppsNum) {
+                    textOnClick(appViews[selectedAppIndex])
+                }
             }
 
-            R.id.date -> {
-                showAppList(Constants.FLAG_SET_CALENDAR_APP)
-                prefs.calendarAppPackage = ""
-                prefs.calendarAppClassName = ""
-                prefs.calendarAppUser = ""
+            override fun onSwipeLeft() {
+                super.onSwipeLeft()
+                if (prefs.homeAppsNum > 0) {
+                    selectNextApp(1)
+                }
+                openSwipeLeftApp()
+            }
+
+            override fun onSwipeRight() {
+                super.onSwipeRight()
+                if (prefs.homeAppsNum > 0) {
+                    selectNextApp(-1)
+                }
+                openSwipeRightApp()
+            }
+
+            override fun onSwipeUp() {
+                super.onSwipeUp()
+                showAppList(Constants.FLAG_LAUNCH_APP)
+            }
+
+            override fun onSwipeDown() {
+                super.onSwipeDown()
+                swipeDownAction()
+            }
+
+            override fun onLongClick() {
+                super.onLongClick()
+                if (selectedAppIndex < prefs.homeAppsNum) {
+                    textOnLongClick(appViews[selectedAppIndex])
+                } else {
+                    try {
+                        findNavController().navigate(R.id.action_mainFragment_to_settingsFragment)
+                        viewModel.firstOpen(false)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+
+            override fun onDoubleClick() {
+                super.onDoubleClick()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+                    binding.lock.performClick()
+                else if (prefs.lockModeOn)
+                    lockPhone()
             }
         }
-        return true
     }
+
+    override fun onClick(view: View) {
+        when (view.id) {
+            R.id.lock -> {}
+            R.id.clock -> openClockApp()
+            R.id.date -> openCalendarApp()
+            R.id.setDefaultLauncher -> viewModel.resetLauncherLiveData.call()
+            R.id.tvScreenTime -> openScreenTimeDigitalWellbeing()
+            else -> {
+                try {
+                    val appLocation = view.tag.toString().toInt()
+                    homeAppClicked(appLocation)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun openScreenTimeDigitalWellbeing() {
+        val intent = Intent()
+        try {
+            intent.setClassName(
+                Constants.DIGITAL_WELLBEING_PACKAGE_NAME,
+                Constants.DIGITAL_WELLBEING_ACTIVITY
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            try {
+                intent.setClassName(
+                    Constants.DIGITAL_WELLBEING_SAMSUNG_PACKAGE_NAME,
+                    Constants.DIGITAL_WELLBEING_SAMSUNG_ACTIVITY
+                )
+                startActivity(intent)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun textOnLongClick(view: View) = onLongClick(view)
 
     private fun initObservers() {
         if (prefs.firstSettingsOpen) {
@@ -188,19 +359,6 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         }
     }
 
-    private fun initSwipeTouchListener() {
-        val context = requireContext()
-        binding.mainLayout.setOnTouchListener(getSwipeGestureListener(context))
-        binding.homeApp1.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp1))
-        binding.homeApp2.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp2))
-        binding.homeApp3.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp3))
-        binding.homeApp4.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp4))
-        binding.homeApp5.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp5))
-        binding.homeApp6.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp6))
-        binding.homeApp7.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp7))
-        binding.homeApp8.setOnTouchListener(getViewSwipeTouchListener(context, binding.homeApp8))
-    }
-
     private fun initClickListeners() {
         binding.lock.setOnClickListener(this)
         binding.clock.setOnClickListener(this)
@@ -230,7 +388,6 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         binding.clock.isVisible = Constants.DateTime.isTimeVisible(prefs.dateTimeVisibility)
         binding.date.isVisible = Constants.DateTime.isDateVisible(prefs.dateTimeVisibility)
 
-//        var dateText = SimpleDateFormat("EEE, d MMM", Locale.getDefault()).format(Date())
         val dateFormat = SimpleDateFormat("EEE, d MMM", Locale.getDefault())
         var dateText = dateFormat.format(Date())
 
@@ -257,6 +414,7 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         } else {
             if (prefs.dateTimeVisibility == Constants.DateTime.DATE_ONLY) 45.dpToPx() else 72.dpToPx()
         }
+
         val params = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
@@ -269,7 +427,6 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
         binding.tvScreenTime.layoutParams = params
         binding.tvScreenTime.setPadding(10.dpToPx())
     }
-
     private fun populateHomeScreen(appCountUpdated: Boolean) {
         if (appCountUpdated) hideHomeApps()
         populateDateTime()
@@ -467,129 +624,43 @@ class HomeFragment : Fragment(), View.OnClickListener, View.OnLongClickListener 
             }
         }
     }
-
-    private fun changeAppTheme() {
-        if (prefs.dailyWallpaper.not()) return
-        val changedAppTheme = getChangedAppTheme(requireContext(), prefs.appTheme)
-        prefs.appTheme = changedAppTheme
-        if (prefs.dailyWallpaper) {
-            setPlainWallpaperByTheme(requireContext(), changedAppTheme)
-            viewModel.setWallpaperWorker()
-        }
-        requireActivity().recreate()
-    }
-
-    private fun openScreenTimeDigitalWellbeing() {
-        val intent = Intent()
-        try {
-            intent.setClassName(
-                Constants.DIGITAL_WELLBEING_PACKAGE_NAME,
-                Constants.DIGITAL_WELLBEING_ACTIVITY
-            )
-            startActivity(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            try {
-                intent.setClassName(
-                    Constants.DIGITAL_WELLBEING_SAMSUNG_PACKAGE_NAME,
-                    Constants.DIGITAL_WELLBEING_SAMSUNG_ACTIVITY
-                )
-                startActivity(intent)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
     private fun showLongPressToast() = requireContext().showToast(getString(R.string.long_press_to_select_app))
 
-    private fun textOnClick(view: View) = onClick(view)
 
-    private fun textOnLongClick(view: View) = onLongClick(view)
-
-    private fun getSwipeGestureListener(context: Context): View.OnTouchListener {
-        return object : OnSwipeTouchListener(context) {
-            override fun onSwipeLeft() {
-                super.onSwipeLeft()
-                openSwipeLeftApp()
+    override fun onLongClick(view: View): Boolean {
+        when (view.id) {
+            R.id.homeApp1 -> showAppList(Constants.FLAG_SET_HOME_APP_1, prefs.appName1.isNotEmpty(), true)
+            R.id.homeApp2 -> showAppList(Constants.FLAG_SET_HOME_APP_2, prefs.appName2.isNotEmpty(), true)
+            R.id.homeApp3 -> showAppList(Constants.FLAG_SET_HOME_APP_3, prefs.appName3.isNotEmpty(), true)
+            R.id.homeApp4 -> showAppList(Constants.FLAG_SET_HOME_APP_4, prefs.appName4.isNotEmpty(), true)
+            R.id.homeApp5 -> showAppList(Constants.FLAG_SET_HOME_APP_5, prefs.appName5.isNotEmpty(), true)
+            R.id.homeApp6 -> showAppList(Constants.FLAG_SET_HOME_APP_6, prefs.appName6.isNotEmpty(), true)
+            R.id.homeApp7 -> showAppList(Constants.FLAG_SET_HOME_APP_7, prefs.appName7.isNotEmpty(), true)
+            R.id.homeApp8 -> showAppList(Constants.FLAG_SET_HOME_APP_8, prefs.appName8.isNotEmpty(), true)
+            R.id.clock -> {
+                showAppList(Constants.FLAG_SET_CLOCK_APP)
+                prefs.clockAppPackage = ""
+                prefs.clockAppClassName = ""
+                prefs.clockAppUser = ""
             }
 
-            override fun onSwipeRight() {
-                super.onSwipeRight()
-                openSwipeRightApp()
-            }
-
-            override fun onSwipeUp() {
-                super.onSwipeUp()
-                showAppList(Constants.FLAG_LAUNCH_APP)
-            }
-
-            override fun onSwipeDown() {
-                super.onSwipeDown()
-                swipeDownAction()
-            }
-
-            override fun onLongClick() {
-                super.onLongClick()
-                try {
-                    findNavController().navigate(R.id.action_mainFragment_to_settingsFragment)
-                    viewModel.firstOpen(false)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            override fun onDoubleClick() {
-                super.onDoubleClick()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
-                    binding.lock.performClick()
-                else if (prefs.lockModeOn)
-                    lockPhone()
-            }
-
-            override fun onClick() {
-                super.onClick()
-                viewModel.checkForMessages.call()
+            R.id.date -> {
+                showAppList(Constants.FLAG_SET_CALENDAR_APP)
+                prefs.calendarAppPackage = ""
+                prefs.calendarAppClassName = ""
+                prefs.calendarAppUser = ""
             }
         }
-    }
-
-    private fun getViewSwipeTouchListener(context: Context, view: View): View.OnTouchListener {
-        return object : ViewSwipeTouchListener(context, view) {
-            override fun onSwipeLeft() {
-                super.onSwipeLeft()
-                openSwipeLeftApp()
-            }
-
-            override fun onSwipeRight() {
-                super.onSwipeRight()
-                openSwipeRightApp()
-            }
-
-            override fun onSwipeUp() {
-                super.onSwipeUp()
-                showAppList(Constants.FLAG_LAUNCH_APP)
-            }
-
-            override fun onSwipeDown() {
-                super.onSwipeDown()
-                swipeDownAction()
-            }
-
-            override fun onLongClick(view: View) {
-                super.onLongClick(view)
-                textOnLongClick(view)
-            }
-
-            override fun onClick(view: View) {
-                super.onClick(view)
-                textOnClick(view)
-            }
-        }
+        return true
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
+        try {
+            toneGenerator.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         _binding = null
     }
 }

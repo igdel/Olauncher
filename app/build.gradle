@@ -71,5 +71,6 @@ dependencies {
 
     //Material dependency
     implementation libs.material
+    implementation libs.media
 
 }
